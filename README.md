@@ -25,10 +25,13 @@ type MessageTab interface{
     //并发发送消息
     Publish(string,interface{})error
     //顺序发送消息
-    PublishOrder(string,interface{}	)error
+    PublishOrder(string,interface{})error
     
     //关闭总消息表
     Close()error
+    
+    //强制关闭
+    Kill()
 }
 ```
 
