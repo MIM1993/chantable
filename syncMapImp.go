@@ -64,8 +64,13 @@ func (msg *msgHandler) Start() error {
 	fn := func() error {
 		for {
 			select {
-			case _ = <-msg.orderChan:
+			case m, ok := <-msg.orderChan:
+				if !ok {
+					_ = msg.Close()
+					return nil
+				}
 				//将消息发送到用户
+				msg.notify(m, true)
 			case <-msg.quitC:
 				//回收资源，关闭消息表
 				close(msg.orderChan)
@@ -104,13 +109,25 @@ func (msg *msgHandler) RegisteredTopic(topic string) error {
 				case m, ok := <-msgC:
 					if !ok {
 						msg.l.Lock()
+						//通知所有订阅者
+						value, ok := msg.topicTab.Load(topic)
+						if ok {
+							subs, sok := value.([]Subscriber)
+							if sok {
+								for _, v := range subs {
+									//调用Quit()
+									v.Quit()
+								}
+							}
+						}
 						//删除topicTab中topic
 						msg.topicTab.Delete(topic)
 						msg.l.Unlock()
+						_ = msg.Close()
 						return nil
 					}
 					//将消息发送到用户
-					_ = m
+					msg.notify(m, true)
 				case <-msg.quitC:
 					//回收资源，关闭消息表
 					close(msgC)
@@ -125,6 +142,35 @@ func (msg *msgHandler) RegisteredTopic(topic string) error {
 		return fmt.Errorf("topic:%s exist,cannot be added repeatedly", topic)
 	}
 	return nil
+}
+
+//接收消息，处理消息
+func (msg *msgHandler) notify(m *Message, isSave bool) {
+	if len(m.Topic) == 0 {
+		return
+	}
+
+	//取出所有的订阅者
+	subs, ok := msg.topicTab.Load(m.Topic)
+	if subs == nil || !ok {
+		return
+	}
+
+	var subArr []Subscriber
+	if subArr, ok = subs.([]Subscriber); !ok {
+		return
+	}
+
+	for _, v := range subArr {
+		if isSave {
+			v.OnMessage(m)
+			continue
+		}
+		go Go(func() error {
+			v.OnMessage(m)
+			return nil
+		})
+	}
 }
 
 func (msg *msgHandler) DelTopic(topic string) error {
@@ -180,6 +226,9 @@ func (msg *msgHandler) AddSubscriber(topic string, sub ...Subscriber) error {
 		if !ok {
 			return fmt.Errorf("type error")
 		}
+		if len(arr) >= int(msg.topicNum) {
+			return fmt.Errorf("The subscription queue is full")
+		}
 		//判断是否有Subyscriber重复
 		for _, v := range sub {
 			if isRedundant(arr, v) {
@@ -187,6 +236,8 @@ func (msg *msgHandler) AddSubscriber(topic string, sub ...Subscriber) error {
 			}
 			arr = append(arr, v)
 		}
+		msg.topicTab.Store(topic, arr)
+		return nil
 	}
 	return fmt.Errorf("topic %s not exit or other cause", topic)
 }
@@ -304,4 +355,5 @@ func (msg *msgHandler) Close() error {
 //强制中出
 func (msg *msgHandler) Kill() {
 	close(msg.quitC)
+	close(msg.orderChan)
 }
